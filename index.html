@@ -46,6 +46,7 @@ figure[data-frame="film"]{--pose:rotate(-1deg);--entry:translateX(36px) rotate(3
       <button id="music">播放音乐</button>
       <label>自选音乐<input id="track" type="file" accept="audio/*"></label>
       <button id="camera">开启手势</button>
+      <label id="pack-label">导入手势包<input id="pack-file" type="file" accept=".js"></label>
     </nav>
     </div>
   </footer>
@@ -401,6 +402,34 @@ resize();requestAnimationFrame(render);
 
 const cameraButton = $('#camera');
 const handStartup = $('#hand-startup');
+const packCache='christmas-gesture-pack-v1';
+const packKey=new URL('./gesture-offline.js',location.href).href;
+let phonePack;
+if (location.protocol==='file:') $('#pack-label').hidden=true;
+else if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./offline-sw.js').catch(console.warn);
+}
+$('#pack-file').onchange=async event=>{
+  const file=event.target.files[0];
+  event.target.value='';
+  if (!file) return;
+  try {
+    if (file.size!==16342747) throw new Error('文件大小不符');
+    const bytes=await file.arrayBuffer();
+    const hash=new Uint8Array(await crypto.subtle.digest('SHA-256',bytes));
+    const hex=Array.from(hash,b=>b.toString(16).padStart(2,'0')).join('');
+    if (hex!=='b6829a3290ee29ef63242898d4e3a0d6adeaf800a22de7f2f66bd7b3bb159f3c') throw new Error('文件校验不通过');
+    phonePack=new Blob([bytes],{type:'text/javascript'});
+    try {
+      await (await caches.open(packCache)).put(packKey,new Response(phonePack));
+      showHandStartup('手势包已保存在此设备，点「开启手势」即可使用');
+    } catch {
+      showHandStartup('手势包已就绪。浏览器存储不可用，重新打开后需再导入');
+    }
+  } catch {
+    showHandStartup('请选择本项目原版 gesture-offline.js 文件');
+  }
+};
 let detector, stream, handFrame, resumeVideo=false, lastTime=-1, lastCheck=0;
 function stable(hand,value,now) {
   if (value!==hand.candidate) { hand.candidate=value; hand.since=now; }
@@ -471,10 +500,19 @@ function showHandStartup(message) {
 }
 async function createHandDetector(signal,report) {
   const options={canvas:document.createElement('canvas'),runningMode:'VIDEO',numHands:2};
-  if (location.protocol==='file:') {
+  const fileMode=location.protocol==='file:';
+  report('正在检查本机手势资源');
+  if (!fileMode && !phonePack && 'caches' in window) {
+    try {
+      const saved=await (await caches.open(packCache)).match(packKey);
+      if (saved) phonePack=await saved.blob();
+    } catch { /* Restricted browser storage still permits online recognition. */ }
+  }
+  if (signal.aborted) throw signal.reason;
+  if (fileMode || phonePack) {
     report('正在读取本地手势资源');
     const script=document.createElement('script');
-    script.src='./gesture-offline.js';
+    script.src=fileMode ? packKey : URL.createObjectURL(phonePack);
     let factory;
     try {
       await new Promise((resolve,reject)=>{
@@ -487,6 +525,7 @@ async function createHandDetector(signal,report) {
     } finally {
       delete window.createOfflineHandDetector;
       script.remove();
+      if (!fileMode) URL.revokeObjectURL(script.src);
     }
     if (signal.aborted) throw signal.reason;
     report('正在启动手势引擎',16000);
@@ -497,8 +536,28 @@ async function createHandDetector(signal,report) {
   async function loadBytes(url) {
     const response=await fetch(url,{signal});
     if (!response.ok) throw new Error('Cannot load '+url+' ('+response.status+')');
-    return response.arrayBuffer();
+    if (!response.body) return response.arrayBuffer();
+    const reader=response.body.getReader(),chunks=[];
+    let length=0;
+    for (;;) {
+      const {done,value}=await reader.read();
+      if (done) break;
+      chunks.push(value);
+      length+=value.length;
+      transferred+=value.length;
+      if (signal.aborted) throw signal.reason;
+      const tenths=Math.floor(transferred/100000);
+      if (tenths!==lastTenths) {
+        lastTenths=tenths;
+        report('正在读取手势资源 '+(tenths/10).toFixed(1)+' MB');
+      }
+    }
+    const bytes=new Uint8Array(length);
+    let offset=0;
+    for (const chunk of chunks) {bytes.set(chunk,offset);offset+=chunk.length;}
+    return bytes.buffer;
   }
+  let transferred=0,lastTenths=-1;
   const runtime=(async()=>{
     const {GestureRecognizer,FilesetResolver}=await import(base+'/vision_bundle.mjs');
     const fileset=await FilesetResolver.forVisionTasks(base);
