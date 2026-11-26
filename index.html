@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Merry Christmas · 电子圣诞树</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#040c0b;color:#f4e9ca;font:14px system-ui,"Microsoft Yahei",sans-serif}
+main{height:100vh;height:100dvh;position:relative;overflow:hidden;background:radial-gradient(ellipse at 50% 60%,#0c2821 0%,#071713 34%,#040c0b 70%)}
+canvas{position:absolute;inset:0;width:100%;height:100%;cursor:pointer}
+h1{position:absolute;top:4%;width:100%;margin:0;text-align:center;font:italic clamp(36px,6vw,80px)/1.2 "Baskerville","Palatino Linotype",Georgia,serif;color:#f0d599;text-shadow:0 2px 25px #9e803b66;pointer-events:none}
+footer{position:absolute;bottom:0;width:100%;text-align:center;pointer-events:none}
+#dock-panel{padding-bottom:22px;transition:opacity .24s,transform .24s}
+footer.tucked:not(:has(:focus-visible)) #dock-panel{opacity:0;transform:translateY(12px)}
+footer.tucked:not(:has(:focus-visible)) nav{pointer-events:none}
+#dock-handle{position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:76px;height:24px;padding:0;pointer-events:auto;background:transparent}
+#dock-handle::after{content:"";display:block;width:34px;height:3px;margin:auto;border-radius:3px;background:#e8d8af88}
+#dock-handle:hover::after,#dock-handle:focus-visible::after{background:#fff0c7}
+#hint{margin:0 12px 10px;color:#d6ccae;text-shadow:0 1px 4px black;font-size:13px}
+@media(prefers-reduced-motion:reduce){#dock-panel{transition:none}}
+nav{pointer-events:auto;display:inline-flex;flex-wrap:wrap;justify-content:center;max-width:95%;gap:4px;border:1px solid #c5af773d;background:#091611ed;border-radius:18px;padding:5px}
+button,nav label{appearance:none;font:inherit;color:#eee1c2;background:transparent;border:0;border-radius:10px;padding:7px 12px;cursor:pointer}button:hover,nav label:hover{background:#ead39718}
+:focus-visible,label:focus-within{outline:2px solid #e9ce86;outline-offset:-2px}
+input[type=file]{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+figure{--pose:rotate(-2deg);--entry:translateY(28px) rotate(-6deg) scale(.88);pointer-events:none;position:absolute;left:50%;top:48%;transform:translate(-50%,-50%) var(--pose);margin:0;background:#fffaf0;padding:9px 9px 24px;box-shadow:0 12px 55px #000b}
+figure img{display:block;max-width:min(72vw,480px);max-height:52vh;object-fit:contain}
+figure.landscape img{max-width:min(80vw,720px)}
+figure[data-frame="gold"]{--pose:rotate(1deg);--entry:translateY(-15px) scale(.83);padding:clamp(10px,1.5vw,18px);background:#17342b;border:3px double #ead29a;outline:1px solid #5e4d30}
+figure[data-frame="film"]{--pose:rotate(-1deg);--entry:translateX(36px) rotate(3deg) scale(.94);padding:17px 8px;background:radial-gradient(ellipse 2.5px 2px at 7px 8px,#d0bd97 95%,transparent) left top/15px 16px repeat-x,radial-gradient(ellipse 2.5px 2px at 7px 8px,#d0bd97 95%,transparent) left bottom/15px 16px repeat-x,#201f1b;border-radius:3px}
+@media(max-width:520px){button,nav label{padding:6px 7px;font-size:12px}h1{top:8%}}
+#tree-toggle{display:none}
+@media(any-pointer:coarse){#tree-toggle{display:block}}
+</style>
+<main>
+  <canvas tabindex="0" aria-label="互动圣诞树。空格切换聚散，回车抽取或收回照片。"></canvas>
+  <h1 lang="en">Merry Christmas</h1>
+  <figure hidden><img alt="随机抽中的照片"></figure>
+  <footer class="tucked">
+    <button id="dock-handle" type="button" aria-label="显示底部工具栏" aria-controls="dock-panel"></button>
+    <div id="dock-panel">
+    <p id="hint" role="status">右键切换聚散 · 散开后左键抽照片</p>
+    <nav aria-label="圣诞树设置">
+      <button id="tree-toggle" type="button">散开圣诞树</button>
+      <label>添加照片<input id="photos" type="file" multiple accept="image/*"></label>
+      <button id="music">播放音乐</button>
+      <label>自选音乐<input id="track" type="file" accept="audio/*"></label>
+      <button id="camera">开启手势</button>
+    </nav>
+    </div>
+  </footer>
+  <audio id="player" src="圣诞铃声.wav" loop preload="none"></audio>
+  <video id="feed" hidden muted playsinline></video>
+</main>
+<script>
+'use strict';
+const $ = selector => document.querySelector(selector);
+const canvas = $('canvas'), ctx = canvas.getContext('2d'), card = $('figure');
+const hint = $('#hint'), player = $('#player'), feed = $('#feed');
+const treeToggle = $('#tree-toggle');
+const touchControls = matchMedia('(any-pointer: coarse)');
+if (touchControls.matches) hint.textContent = '散开圣诞树后，点画面抽取或收回照片';
+const dock = $('footer');
+document.addEventListener('pointermove', event => {
+  if (event.pointerType !== 'mouse') return;
+  const {top,bottom}=dock.getBoundingClientRect();
+  const revealAt=dock.classList.contains('tucked') ? bottom-30 : top;
+  dock.classList.toggle('tucked',event.clientY<revealAt || event.clientY>bottom);
+});
+document.documentElement.addEventListener('pointerleave',event => {
+  if (event.pointerType === 'mouse') dock.classList.add('tucked');
+});
+document.addEventListener('pointerdown', event => {
+  if (event.pointerType === 'mouse') return;
+  if (event.target.closest('#dock-handle')) dock.classList.toggle('tucked');
+  else if (!dock.contains(event.target)) dock.classList.add('tucked');
+});
+const images = [];
+let spread = false, amount = 0, selected = -1, lastPhoto = -1, displayed = -1;
+let photoMotion;
+const frames = ['instant','gold','film'];
+function pickOther(count, previous) {
+  if (previous < 0 || count === 1) return Math.floor(Math.random()*count);
+  const n = Math.floor(Math.random()*(count-1));
+  return n >= previous ? n+1 : n;
+}
+function presentPhoto() {
+  displayed = selected;
+  const image = images[displayed];
+  const landscape = image.naturalWidth > image.naturalHeight;
+  const previousFrame = frames.indexOf(card.dataset.frame);
+  card.dataset.frame = previousFrame < 0 ? (landscape ? 'film' : 'instant') : frames[pickOther(frames.length,previousFrame)];
+  card.classList.toggle('landscape',landscape);
+  $('figure img').src = image.src;
+  card.hidden = false;
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const center = 'translate(-50%,-50%) ';
+  photoMotion = card.animate([
+    {opacity:0,transform:center+(reduced ? 'var(--pose)' : 'var(--entry)')},
+    {opacity:1,transform:center+'var(--pose)'}
+  ],{duration:reduced ? 150 : 520,easing:'ease-in-out',fill:'both'});
+  photoMotion.onfinish = () => {
+    if (photoMotion.playbackRate > 0) return;
+    card.hidden = true;
+    displayed = -1;
+    photoMotion.cancel();
+    if (selected >= 0) presentPhoto();
+  };
+}
+function putBack() {
+  if (selected < 0) return;
+  selected = -1;
+  if (photoMotion.playbackRate > 0) photoMotion.reverse();
+  hint.textContent = '照片已放回 · 左键或左手捏合可再抽一张';
+}
+function setSpread(next) {
+  spread = next;
+  if (!spread) putBack();
+  treeToggle.textContent = spread ? '收拢圣诞树' : '散开圣诞树';
+  hint.textContent = touchControls.matches
+    ? (spread ? '树已散开 · 点画面抽照片' : '树已收拢')
+    : (spread ? '树已散开 · 左键抽照片，右键收拢' : '树已收拢 · 右键散开');
+}
+function drawPhoto() {
+  if (selected >= 0) return;
+  if (!spread) { hint.textContent = '先散开圣诞树，再点画面抽照片'; return; }
+  if (!images.length) { hint.textContent = '先点「添加照片」，再点画面抽取'; return; }
+  selected = pickOther(images.length,lastPhoto);
+  lastPhoto = selected;
+  if (card.hidden) presentPhoto();
+  hint.textContent = '再点一次画面或左手松开，照片放回';
+}
+function togglePhoto() { selected < 0 ? drawPhoto() : putBack(); }
+treeToggle.addEventListener('click', () => setSpread(!spread));
+canvas.addEventListener('contextmenu', event => { event.preventDefault(); setSpread(!spread); });
+canvas.addEventListener('click', togglePhoto);
+canvas.addEventListener('keydown', event => {
+  if (![' ', 'Enter'].includes(event.key)) return;
+  event.preventDefault();
+  if (!event.repeat) event.key === ' ' ? setSpread(!spread) : togglePhoto();
+});
+$('#photos').onchange = async event => {
+  const files = [...event.target.files];
+  event.target.value = '';
+  let failed = 0;
+  for (const file of files) {
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    try { await img.decode(); images.push(img); }
+    catch { URL.revokeObjectURL(img.src); failed++; }
+  }
+  hint.textContent = '已添加 ' + images.length + ' 张照片' + (failed ? ' · 有 ' + failed + ' 张无法读取' : '') + ' · ' + (spread ? '左键抽取' : '右键散开');
+};
+async function playMusic() {
+  try { await player.play(); } catch { hint.textContent = '无法播放这段音乐，请重新选择音频文件'; }
+}
+$('#music').onclick = () => player.paused ? playMusic() : player.pause();
+player.onplay = () => $('#music').textContent = '暂停音乐';
+player.onpause = () => $('#music').textContent = '播放音乐';
+$('#track').onchange = event => {
+  const file = event.target.files[0];
+  if (!file) return;
+  if (player.src.startsWith('blob:')) URL.revokeObjectURL(player.src);
+  player.src = URL.createObjectURL(file);
+  event.target.value = '';
+  playMusic();
+};
+
+// 每个光点各自保存树上和展开后的坐标，切换时沿两点之间平滑移动。
+const rand = Math.random, tau = 2 * Math.PI;
+const colors = ['#5dba80','#399e68','#a1d19a','#ffda80','#edb852','#fff2b9','#d35d45'];
+const snowCrystal=new Path2D();
+const snowBranch=new Path2D('M0 0 V-31 M-8 -21 L0 -14 L8 -21 M-6 -29 L0 -24 L6 -29');
+for (let i=0;i<6;i++) snowCrystal.addPath(snowBranch,new DOMMatrix().rotate(i*60));
+// 装饰粒子只绘制一次，动画帧复用透明图像。
+const particleSprites=['star','spark','snow','gem','bauble','gift'].map(shape=>{
+  const sprite=document.createElement('canvas');
+  sprite.width=sprite.height=80;
+  const pen=sprite.getContext('2d');
+  pen.translate(40,40);
+  pen.lineCap=pen.lineJoin='round';
+  if (shape==='snow') {
+    pen.strokeStyle='#c8efff'; pen.lineWidth=3;
+    pen.stroke(snowCrystal);
+  } else if (shape==='bauble') {
+    const glass=pen.createRadialGradient(-10,-9,2,2,4,28);
+    glass.addColorStop(0,'#fff2c8');glass.addColorStop(.35,'#ff8972');glass.addColorStop(1,'#8f1932');
+    pen.fillStyle='#f4d186';pen.fillRect(-6,-31,12,9);
+    pen.fillStyle=glass;pen.beginPath();pen.arc(0,1,25,0,tau);pen.fill();
+  } else if (shape==='gift') {
+    pen.fillStyle='#de5c52';pen.fillRect(-23,-12,46,37);
+    pen.fillStyle='#ffc87c';pen.fillRect(-25,-13,50,7);pen.fillRect(-4,-13,8,38);
+    pen.strokeStyle='#ffde9b';pen.lineWidth=3;
+    pen.stroke(new Path2D('M0 -13 Q-24 -14 -18 -24 Q-11 -32 0 -13 Q12 -32 18 -24 Q24 -14 0 -13'));
+  } else if (shape==='gem') {
+    pen.fillStyle='#53c8af';pen.fill(new Path2D('M0 -32 L21 0 L0 32 L-21 0 Z'));
+    pen.fillStyle='#b8f6da';pen.fill(new Path2D('M0 -32 L-4 2 L-21 0 Z'));
+    pen.fillStyle='#238477';pen.fill(new Path2D('M-4 2 L21 0 L0 32 Z'));
+  } else {
+    const tips=shape==='star'?5:4, star=new Path2D();
+    for (let i=0;i<tips*2;i++) {
+      const a=i*Math.PI/tips-Math.PI/2, r=i%2 ? (tips===5?14:7) : 32;
+      star.lineTo(Math.cos(a)*r,Math.sin(a)*r);
+    }
+    star.closePath();pen.fillStyle=shape==='star'?'#ffcf70':'#fff4c6';pen.fill(star);
+    pen.strokeStyle='#fff0ba';pen.lineWidth=1.5;pen.stroke(star);
+  }
+  return sprite;
+});
+const points = Array.from({length:3900}, (_, i) => {
+  const t = Math.sqrt(rand()), angle = rand()*tau;
+  const layer = (t*12)%1, radius = t*(0.70+0.30*layer)*(0.82+0.18*rand());
+  const ribbon = i%7 === 0;
+  const phi = ribbon ? t*tau*4.5 + 0.10*rand() : angle;
+  const sprite=i%79===0 ? particleSprites[(i/79)%particleSprites.length] : null;
+  return {t, cosPhi:Math.cos(phi), sinPhi:Math.sin(phi), radius, sprite,
+    spreadRadius:Math.sqrt(rand()), spreadY:rand()*2-1, size:sprite ? 14+rand()*16 : .6+5*rand()**6,
+    color:ribbon ? colors[3+i%3] : colors[i%23===0 ? 6 : Math.floor(rand()*6)]};
+});
+const snow = Array.from({length:140},()=>[rand(),rand(),rand()]);
+const snowfall = Array.from({length:1200},()=>({x:rand(),y:rand(),depth:rand(),phase:tau*rand()}));
+// 用实边轮廓内的明暗表现积雪厚度；亮面朝向左上方。
+const settledSnow=document.createElement('canvas');
+settledSnow.width=32;settledSnow.height=24;
+const snowPen=settledSnow.getContext('2d');
+const snowLight=snowPen.createLinearGradient(12,4,16,21);
+snowLight.addColorStop(0,'#fbfdff');snowLight.addColorStop(.44,'#e3eef0');snowLight.addColorStop(1,'#849fa5');
+snowPen.fillStyle=snowLight;
+snowPen.fill(new Path2D('M3 15 Q2 10 8 9 Q10 4 15 5 Q20 3 23 9 Q29 9 29 15 Q29 19 23 20 Q15 22 9 20 Q3 20 3 15 Z'));
+function caughtBranch(tier,dx,dz,treeHeight,treeRadius,angle) {
+  const cs=Math.cos(angle),sn=Math.sin(angle);
+  const localX=dx*cs+dz*sn,localZ=dz*cs-dx*sn;
+  let nearest=null,best=Infinity;
+  for (const p of points) {
+    const dy=(p.t-tier/12)*treeHeight;
+    if (p.sprite || Math.abs(dy)>treeHeight/30) continue;
+    const radius=p.radius*treeRadius;
+    const dist=(p.cosPhi*radius-localX)**2+dy**2+(p.sinPhi*radius-localZ)**2;
+    if (dist<best) {best=dist;nearest=p;}
+  }
+  return nearest;
+}
+function drawSnowfall(now,dt,intensity,top,treeHeight,treeRadius,angle) {
+  if (intensity<.01) return;
+  const count=Math.min(snowfall.length,Math.ceil(width*height/1150));
+  const seconds=now/1000;
+  ctx.save();
+  ctx.fillStyle='#e0eff7';
+  ctx.strokeStyle='#f2f9ff';
+  for (let i=0;i<count;i++) {
+    const flake=snowfall[i], {x,y,depth,phase}=flake;
+    const size=2+16*depth**3;
+    const drift=seconds*(9+depth*20)+Math.sin(seconds*.8+phase)*(7+depth*18);
+    const px=(x*(width+40)+drift+40)%(width+40)-20;
+    const speed=32+depth*115, travel=y*(height+40)+seconds*speed;
+    const lap=Math.floor(travel/(height+40));
+    if (flake.caughtLap===lap) continue;
+    const py=travel%(height+40)-20;
+    const dx=px-width/2;
+    if (intensity>.96 && Math.abs(dx)<treeRadius && py>=top-20 && py<top+treeHeight+treeRadius*.2) {
+      // 在雪花自身的景深处检测下落轨迹与十二层枝梢的交点。
+      const dz=Math.sin(phase)*treeRadius*1.24;
+      const foot=py+size*.36-top-dz*.19;
+      const tier=Math.floor(foot/treeHeight*12);
+      if (tier>=1 && tier<=12 && foot-tier*treeHeight/12<=speed*dt/1000) {
+        const radius=Math.hypot(dx,dz)/treeRadius;
+        if (radius<=tier/12 && radius>=(tier-.99)/12) {
+          const branch=caughtBranch(tier,dx,dz,treeHeight,treeRadius,angle);
+          if (branch) {
+            flake.caughtLap=lap;
+            flake.deposit={branch,time:now};
+            continue;
+          }
+        }
+      }
+    }
+    ctx.globalAlpha=intensity*(.30+depth*.62);
+    if (size<8) {
+      ctx.fillRect(px,py,1+depth,1+depth*2);
+    } else {
+      ctx.save();ctx.translate(px,py);ctx.rotate(phase+seconds*.32);
+      ctx.scale(size/62*(.78+.22*Math.sin(phase+seconds)),size/62);
+      ctx.lineWidth=62/size;
+      ctx.stroke(snowCrystal);ctx.restore();
+    }
+  }
+  ctx.restore();
+}
+function drawBranchSnow(now,intensity,top,treeHeight,treeRadius,cs,sn,front) {
+  if (intensity<.01) return;
+  ctx.save();
+  for (const flake of snowfall) {
+    const patch=flake.deposit;
+    if (!patch) continue;
+    const age=(now-patch.time)/1000;
+    if (age>26) { delete flake.deposit; continue; }
+    const p=patch.branch, radius=p.radius*treeRadius;
+    const near=p.cosPhi*sn+p.sinPhi*cs;
+    if ((near>=0)!==front) continue;
+    const x=width/2+(p.cosPhi*cs-p.sinPhi*sn)*radius;
+    const y=top+p.t*treeHeight+near*radius*.19;
+    const settle=Math.min(1,age/.32);
+    const size=(4+flake.depth*7)*(1+.13*near);
+    ctx.globalAlpha=intensity**3*(.78+.19*near)*Math.min(1,(26-age)/4);
+    ctx.drawImage(settledSnow,x-size*.5,y-size*(.65-.1*settle),size,size*.75);
+  }
+  ctx.restore();
+}
+let width=0,height=0,previous=0;
+function resize() {
+  width=canvas.clientWidth; height=canvas.clientHeight;
+  const dpr=Math.min(devicePixelRatio,2);
+  canvas.width=Math.round(width*dpr); canvas.height=Math.round(height*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+new ResizeObserver(resize).observe(canvas);
+function render(now) {
+  const dt=Math.min(80,now-previous); previous=now;
+  amount += (Number(spread)-amount)*(1-Math.exp(-dt/350));
+  ctx.clearRect(0,0,width,height);
+  const centerX=width/2, centerY=height/2;
+  const treeHeight=Math.min(height*.54,540), treeRadius=Math.min(width*.23,treeHeight*.47);
+  const top=centerY-treeHeight/2;
+  for (const [x,y,s] of snow) {
+    ctx.fillStyle='rgba(236,242,219,'+(.15+s*.55)+')';
+    ctx.fillRect(x*width,((y+now*(1+s)/90000)%1)*height,1+s,1+s*1.5);
+  }
+  const angle=now*tau/3600, cs=Math.cos(angle), sn=Math.sin(angle);
+  drawSnowfall(now,dt,1-amount,top,treeHeight,treeRadius,angle);
+  function position(p,extent) {
+    const orbitRadius=Math.max(0,centerX-extent-4), orbitHeight=Math.max(0,centerY-extent-4);
+    const radius=p.radius*treeRadius*(1-amount)+p.spreadRadius*orbitRadius*amount;
+    const sinPhase=p.cosPhi*sn+p.sinPhi*cs;
+    const depth=sinPhase*(p.radius*(1-amount)+p.spreadRadius*amount);
+    const x=(p.cosPhi*cs-p.sinPhi*sn)*radius;
+    const tiltFraction=p.spreadRadius*.14;
+    const y=(p.t-.5)*treeHeight*(1-amount)+p.spreadY*orbitHeight*(1-tiltFraction)*amount;
+    const tilt=sinPhase*(p.radius*treeRadius*.19*(1-amount)+tiltFraction*orbitHeight*amount);
+    return [centerX+x,centerY+y+tilt,depth];
+  }
+  drawBranchSnow(now,1-amount,top,treeHeight,treeRadius,cs,sn,false);
+  for (const p of points) {
+    const [x,y,z]=position(p,p.size*1.65),size=p.size*(1+z*.35+amount*.3);
+    ctx.fillStyle=p.color; ctx.globalAlpha=.57+.38*Math.sin(p.t*126+now*.0008)**2;
+    if (p.sprite) {
+      const diameter=size*(.72+amount*.5);
+      ctx.save();ctx.translate(x,y);ctx.rotate(.22*Math.sin(angle+p.t*9));
+      ctx.drawImage(p.sprite,-diameter/2,-diameter/2,diameter,diameter);
+      ctx.restore();
+    } else if (p.size<2) {
+      ctx.fillRect(x,y,size,size);
+    } else {
+      ctx.beginPath(); ctx.arc(x,y,size/2,0,tau); ctx.fill();
+      if (p.size>4) {
+        ctx.globalAlpha*=.13;
+        ctx.beginPath(); ctx.arc(x,y,size,0,tau); ctx.fill();
+      }
+    }
+  }
+  ctx.globalAlpha=1;
+  drawBranchSnow(now,1-amount,top,treeHeight,treeRadius,cs,sn,true);
+  const ornamentCount=images.length || 9;
+  for (let i=0;i<ornamentCount;i++) {
+    const opacity=i===displayed ? 1-photoMotion.effect.getComputedTiming().progress : 1;
+    if (opacity<=0) continue;
+    const baseRadius=Math.max(8,treeRadius*.065);
+    const [x,y,z]=position(points[(i*103+45)%points.length],baseRadius*1.89);
+    const r=baseRadius*(1.1+z*.23+amount*.56);
+    ctx.save(); ctx.globalAlpha=opacity; ctx.translate(x,y);
+    ctx.beginPath(); ctx.arc(0,0,r,0,tau); ctx.clip();
+    const img=images[i];
+    if (img) {
+      const side=Math.min(img.naturalWidth,img.naturalHeight);
+      ctx.drawImage(img,(img.naturalWidth-side)/2,(img.naturalHeight-side)/2,side,side,-r,-r,r*2,r*2);
+    } else {
+      ctx.fillStyle=['#246b5b','#964448','#36546c'][i%3]; ctx.fill();
+      ctx.fillStyle='#ffebbe'; ctx.font=Math.round(r*1.45)+'px Georgia, serif';
+      ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(['✦','❄','✧'][i%3],0,0);
+    }
+    ctx.strokeStyle='#e7d39b'; ctx.lineWidth=2; ctx.stroke();
+    ctx.beginPath(); ctx.arc(0,0,r*.79,3.5+z*.3,4.7+z*.3);
+    ctx.strokeStyle='#ffffff8a'; ctx.lineWidth=Math.max(1,r*.08); ctx.stroke(); ctx.restore();
+  }
+  ctx.save(); ctx.translate(width/2,top-3);ctx.globalAlpha=1-amount;ctx.beginPath();
+  const starSize=Math.min(20,treeRadius*.15);
+  for(let i=0;i<10;i++){const a=i*Math.PI/5-Math.PI/2,r=starSize*(i%2?.44:1);ctx.lineTo(Math.cos(a)*r,Math.sin(a)*r);}
+  ctx.closePath();ctx.shadowColor='#ffcd65';ctx.shadowBlur=16;ctx.fillStyle='#ffe6a5';ctx.fill();ctx.restore();
+  requestAnimationFrame(render);
+}
+resize();requestAnimationFrame(render);
+
+let detector, stream, lastTime=-1, lastCheck=0;
+const hands={Left:{},Right:{}};
+function stable(hand,value,now) {
+  if (value!==hand.candidate) { hand.candidate=value; hand.since=now; }
+  if (!value || now-hand.since<110 || value===hand.value) return false;
+  hand.value=value;
+  return true;
+}
+function readHands(now) {
+  if (!stream) return;
+  if (feed.readyState>=2 && feed.currentTime!==lastTime && now-lastCheck>55) {
+    lastTime=feed.currentTime; lastCheck=now;
+    const result=detector.recognizeForVideo(feed,now);
+    const seen=new Set();
+    for (let i=0;i<result.landmarks.length;i++) {
+      // 模型的左右手约定对应镜像自拍；传入原始未镜像视频时交换标签。
+      const side=result.handedness[i][0].categoryName==='Left'?'Right':'Left';
+      seen.add(side);
+      const hand=hands[side];
+      if (side==='Right') {
+        const g=result.gestures[i][0], name=g?.score>=.65 ? g.categoryName : '';
+        if (stable(hand,['Open_Palm','Closed_Fist'].includes(name)?name:'',now)) setSpread(name==='Open_Palm');
+      } else {
+        const p=result.worldLandmarks[i];
+        const dist=(a,b)=>Math.hypot(p[a].x-p[b].x,p[a].y-p[b].y,p[a].z-p[b].z);
+        const ratio=dist(4,8)/Math.max(.001,dist(5,17));
+        const pose=ratio<.25?'pinch':ratio>.4?'open':hand.value;
+        const wasPinched=hand.value==='pinch';
+        if (stable(hand,pose,now) && spread) {
+          if (pose==='pinch') drawPhoto();
+          else if (wasPinched) putBack();
+        }
+      }
+    }
+    for (const side of Object.keys(hands)) if (!seen.has(side)) hands[side].candidate=null;
+  }
+  requestAnimationFrame(readHands);
+}
+function stopCamera() {
+  stream?.getTracks().forEach(track=>track.stop());stream=null;feed.srcObject=null;
+  hands.Left={};hands.Right={};lastTime=-1;
+  $('#camera').textContent='开启手势';
+}
+$('#camera').onclick=async event=>{
+  const button=event.currentTarget;
+  if (stream) { stopCamera();hint.textContent='手势已关闭 · 右键切换聚散，左键抽照片';return; }
+  button.disabled=true;
+  try {
+    hint.textContent='正在开启摄像头并加载手势模型…';
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:640,height:480},audio:false});
+    feed.srcObject=stream;await feed.play();
+    if (!detector) {
+      const base='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304';
+      const {GestureRecognizer,FilesetResolver}=await import(base+'/vision_bundle.mjs');
+      detector=await GestureRecognizer.createFromOptions(await FilesetResolver.forVisionTasks(base+'/wasm'),{
+        baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task'},
+        runningMode:'VIDEO',numHands:2
+      });
+    }
+    button.textContent='关闭手势';hint.textContent='右手握拳收拢、张掌散开 · 左手捏合抽取、松开放回';
+    requestAnimationFrame(readHands);
+  } catch (error) {
+    stopCamera();hint.textContent='手势未开启，请检查摄像头权限与网络 · 仍可使用鼠标';
+    console.warn(error);
+  } finally {button.disabled=false;}
+};
+</script>
+</html>
