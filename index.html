@@ -30,6 +30,7 @@ figure[data-frame="film"]{--pose:rotate(-1deg);--entry:translateX(36px) rotate(3
 #tree-toggle{display:none}
 @media(any-pointer:coarse){#tree-toggle{display:block}}
 #feed{position:absolute;right:12px;bottom:108px;width:clamp(76px,17vw,132px);aspect-ratio:4/3;object-fit:cover;border:1px solid #d5c08a75;border-radius:8px;transform:scaleX(-1);pointer-events:none}
+#pinch-hint{position:absolute;right:12px;bottom:calc(118px + clamp(57px,12.75vw,99px));margin:0;padding:7px 10px;border-radius:8px;background:#091611ed;color:#f4e9ca;font-size:13px;pointer-events:none}
 </style>
 <main>
   <canvas tabindex="0" aria-label="互动圣诞树。空格切换聚散，回车抽取或收回照片。"></canvas>
@@ -50,12 +51,14 @@ figure[data-frame="film"]{--pose:rotate(-1deg);--entry:translateX(36px) rotate(3
   </footer>
   <audio id="player" src="圣诞铃声.wav" loop preload="none"></audio>
   <video id="feed" hidden autoplay muted playsinline aria-hidden="true"></video>
+  <p id="pinch-hint" role="status" hidden>已识别左手捏合，请先在底栏添加照片。</p>
 </main>
 <script>
 'use strict';
 const $ = selector => document.querySelector(selector);
 const canvas = $('canvas'), ctx = canvas.getContext('2d'), card = $('figure');
 const hint = $('#hint'), player = $('#player'), feed = $('#feed');
+const pinchHint = $('#pinch-hint');
 const treeToggle = $('#tree-toggle');
 const touchControls = matchMedia('(any-pointer: coarse)');
 if (touchControls.matches) hint.textContent = '散开圣诞树后，点画面抽取或收回照片';
@@ -75,6 +78,7 @@ document.addEventListener('pointerdown', event => {
   else if (!dock.contains(event.target)) dock.classList.add('tucked');
 });
 const images = [];
+const hands = {Left:{},Right:{}};
 let spread = false, amount = 0, selected = -1, lastPhoto = -1, displayed = -1;
 let photoMotion;
 const frames = ['instant','gold','film'];
@@ -114,7 +118,11 @@ function putBack() {
 }
 function setSpread(next) {
   spread = next;
-  if (!spread) putBack();
+  if (!spread) {
+    putBack();
+    hands.Left={};
+    pinchHint.hidden=true;
+  }
   treeToggle.textContent = spread ? '收拢圣诞树' : '散开圣诞树';
   hint.textContent = touchControls.matches
     ? (spread ? '树已散开 · 点画面抽照片' : '树已收拢')
@@ -148,6 +156,7 @@ $('#photos').onchange = async event => {
     try { await img.decode(); images.push(img); }
     catch { URL.revokeObjectURL(img.src); failed++; }
   }
+  if (images.length) pinchHint.hidden=true;
   hint.textContent = '已添加 ' + images.length + ' 张照片' + (failed ? ' · 有 ' + failed + ' 张无法读取' : '') + ' · ' + (spread ? '左键抽取' : '右键散开');
 };
 async function playMusic() {
@@ -390,12 +399,22 @@ resize();requestAnimationFrame(render);
 
 const cameraButton = $('#camera');
 let detector, stream, handFrame, resumeVideo=false, lastTime=-1, lastCheck=0;
-const hands={Left:{},Right:{}};
 function stable(hand,value,now) {
   if (value!==hand.candidate) { hand.candidate=value; hand.since=now; }
   if (!value || now-hand.since<110 || value===hand.value) return false;
   hand.value=value;
   return true;
+}
+function leftPose(points) {
+  const aspect=feed.videoWidth/feed.videoHeight;
+  // 按实际画面宽高换算距离，掌长可补偿侧手时变窄的掌宽。
+  const distance=(a,b)=>Math.hypot((points[a].x-points[b].x)*aspect,points[a].y-points[b].y);
+  const palmSize=Math.max(distance(5,17),distance(0,9));
+  if (palmSize<.001) return null;
+  const gap=distance(4,8)/palmSize;
+  if (gap<=.38) return 'pinch';
+  if (gap>=.55) return 'open';
+  return hands.Left.value;
 }
 function readHands(now) {
   if (!stream) return;
@@ -409,29 +428,25 @@ function readHands(now) {
       console.warn(error);
       return;
     }
-    const seen=new Set();
-    for (let i=0;i<result.landmarks.length;i++) {
-      // 只有预览做了镜像，模型接收原始帧，左右手标签可以直接使用。
-      const side=result.handedness[i]?.[0]?.categoryName;
-      if (side!=='Left' && side!=='Right') continue;
-      seen.add(side);
-      const hand=hands[side];
-      if (side==='Right') {
-        const g=result.gestures[i][0], name=g?.score>=.65 ? g.categoryName : '';
-        if (stable(hand,['Open_Palm','Closed_Fist'].includes(name)?name:'',now)) setSpread(name==='Open_Palm');
-      } else {
-        const p=result.worldLandmarks[i];
-        const dist=(a,b)=>Math.hypot(p[a].x-p[b].x,p[a].y-p[b].y,p[a].z-p[b].z);
-        const ratio=dist(4,8)/Math.max(.001,dist(5,17));
-        const pose=ratio<.25?'pinch':ratio>.4?'open':hand.value;
-        const wasPinched=hand.value==='pinch';
-        if (stable(hand,pose,now) && spread) {
-          if (pose==='pinch') drawPhoto();
-          else if (wasPinched) putBack();
-        }
+    // 镜像只用于预览。先处理右手聚散，再判断当前帧的左手。
+    const handIndex=side=>result.handedness.findIndex(hand=>hand[0]?.categoryName===side);
+    const rightGesture=result.gestures[handIndex('Right')]?.[0];
+    const rightPose=rightGesture?.score>=.65 ? rightGesture.categoryName : '';
+    if (stable(hands.Right,['Open_Palm','Closed_Fist'].includes(rightPose)?rightPose:null,now)) {
+      setSpread(rightPose==='Open_Palm');
+    }
+    const left=result.landmarks[handIndex('Left')];
+    const wasPinched=hands.Left.value==='pinch';
+    const pose=spread && left ? leftPose(left) : null;
+    if (stable(hands.Left,pose,now)) {
+      if (pose==='pinch') {
+        pinchHint.hidden=images.length>0;
+        drawPhoto();
+      } else if (wasPinched) {
+        pinchHint.hidden=true;
+        putBack();
       }
     }
-    for (const side of Object.keys(hands)) if (!seen.has(side)) hands[side].candidate=null;
   }
   handFrame=requestAnimationFrame(readHands);
 }
@@ -439,6 +454,7 @@ function stopCamera() {
   cancelAnimationFrame(handFrame);
   stream?.getTracks().forEach(track=>track.stop());stream=null;feed.srcObject=null;
   feed.hidden=true;resumeVideo=false;
+  pinchHint.hidden=true;
   hands.Left={};hands.Right={};lastTime=-1;
   cameraButton.textContent='开启手势';
 }
