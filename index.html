@@ -88,6 +88,7 @@ function pickOther(count, previous) {
   return n >= previous ? n+1 : n;
 }
 function presentPhoto() {
+  photoMotion?.cancel();
   displayed = selected;
   const image = images[displayed];
   const landscape = image.naturalWidth > image.naturalHeight;
@@ -98,16 +99,16 @@ function presentPhoto() {
   card.hidden = false;
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const center = 'translate(-50%,-50%) ';
-  photoMotion = card.animate([
+  const motion = card.animate([
     {opacity:0,transform:center+(reduced ? 'var(--pose)' : 'var(--entry)')},
     {opacity:1,transform:center+'var(--pose)'}
-  ],{duration:reduced ? 150 : 520,easing:'ease-in-out',fill:'both'});
-  photoMotion.onfinish = () => {
-    if (photoMotion.playbackRate > 0) return;
+  ],{duration:reduced ? 100 : 220,easing:'ease-out',fill:'both'});
+  photoMotion = motion;
+  motion.onfinish = () => {
+    if (photoMotion!==motion || motion.playbackRate>=0 || motion.playState!=='finished') return;
     card.hidden = true;
     displayed = -1;
-    photoMotion.cancel();
-    if (selected >= 0) presentPhoto();
+    motion.cancel();
   };
 }
 function putBack() {
@@ -134,7 +135,7 @@ function drawPhoto() {
   if (!images.length) { hint.textContent = '先点「添加照片」，再点画面抽取'; return; }
   selected = pickOther(images.length,lastPhoto);
   lastPhoto = selected;
-  if (card.hidden) presentPhoto();
+  presentPhoto();
   hint.textContent = '再点一次画面或左手松开，照片放回';
 }
 function togglePhoto() { selected < 0 ? drawPhoto() : putBack(); }
@@ -414,11 +415,11 @@ function leftPose(points) {
   const gap=distance(4,8)/palmSize;
   if (gap<=.38) return 'pinch';
   if (gap>=.55) return 'open';
-  return hands.Left.value;
+  return null;
 }
 function readHands(now) {
   if (!stream) return;
-  if (feed.readyState>=2 && feed.currentTime!==lastTime && now-lastCheck>55) {
+  if (feed.readyState>=2 && feed.currentTime!==lastTime && now-lastCheck>=32) {
     lastTime=feed.currentTime; lastCheck=now;
     let result;
     try { result=detector.recognizeForVideo(feed,now); }
@@ -436,9 +437,11 @@ function readHands(now) {
       setSpread(rightPose==='Open_Palm');
     }
     const left=result.landmarks[handIndex('Left')];
-    const wasPinched=hands.Left.value==='pinch';
     const pose=spread && left ? leftPose(left) : null;
-    if (stable(hands.Left,pose,now)) {
+    // 分开的捏合、松开阈值已经能防止抖动，左手跨过阈值即响应。
+    if (pose && pose!==hands.Left.value) {
+      const wasPinched=hands.Left.value==='pinch';
+      hands.Left.value=pose;
       if (pose==='pinch') {
         pinchHint.hidden=images.length>0;
         drawPhoto();
