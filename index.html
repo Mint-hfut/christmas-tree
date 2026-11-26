@@ -161,10 +161,21 @@ $('#photos').onchange = async event => {
   if (images.length) pinchHint.hidden=true;
   hint.textContent = '已添加 ' + images.length + ' 张照片' + (failed ? ' · 有 ' + failed + ' 张无法读取' : '') + ' · ' + (spread ? '左键抽取' : '右键散开');
 };
+let keepMusicDuringStartup=false;
+function resumeStartupMusic() {
+  if (keepMusicDuringStartup && player.paused && !document.hidden) {
+    player.play().catch(()=>{}); // Some phones require another tap to resume audio.
+  }
+}
 async function playMusic() {
+  keepMusicDuringStartup=cameraButton.disabled;
   try { await player.play(); } catch { hint.textContent = '无法播放这段音乐，请重新选择音频文件'; }
 }
-$('#music').onclick = () => player.paused ? playMusic() : player.pause();
+$('#music').onclick = () => {
+  if (player.paused) return playMusic();
+  keepMusicDuringStartup=false;
+  player.pause();
+};
 player.onplay = () => $('#music').textContent = '暂停音乐';
 player.onpause = () => $('#music').textContent = '播放音乐';
 $('#track').onchange = event => {
@@ -472,7 +483,6 @@ function stopCamera() {
 function showHandStartup(message) {
   handStartup.textContent=message;
   handStartup.hidden=false;
-  hint.textContent=message;
 }
 async function createHandDetector(signal,report) {
   const options={canvas:document.createElement('canvas'),runningMode:'VIDEO',numHands:2};
@@ -594,10 +604,13 @@ cameraButton.onclick=async ()=>{
     return;
   }
   cameraButton.disabled=true;
+  keepMusicDuringStartup=!player.paused;
+  // Try once at the interruption and again after camera startup has settled.
+  player.addEventListener('pause',resumeStartupMusic,{once:true});
   let stage='camera';
   try {
     if (!stream) {
-      hint.textContent='正在申请摄像头权限…';
+      showHandStartup('正在申请摄像头权限…');
       stream=await navigator.mediaDevices.getUserMedia({
         video:{facingMode:{ideal:'user'},width:{ideal:640},height:{ideal:480},frameRate:{ideal:24}},audio:false
       });
@@ -606,8 +619,9 @@ cameraButton.onclick=async ()=>{
       feed.srcObject=stream;
     }
     stage='video';
-    hint.textContent='正在启动摄像头画面…';
+    showHandStartup('正在启动摄像头画面…');
     await feed.play();
+    resumeStartupMusic();
     resumeVideo=false;
     stage='model';
     if (!detector) detector=await initializeHandDetector();
@@ -619,7 +633,7 @@ cameraButton.onclick=async ()=>{
     if (stage==='video' && error.name==='NotAllowedError') {
       resumeVideo=true;
       cameraButton.textContent='继续开启手势';
-      hint.textContent='摄像头已授权，请再点一次以启动画面';
+      showHandStartup('摄像头已授权，请再点一次以启动画面');
       return;
     }
     stopCamera();
@@ -632,7 +646,12 @@ cameraButton.onclick=async ()=>{
     else if (error.name==='NotFoundError') hint.textContent='没有找到可用的摄像头';
     else hint.textContent='摄像头启动失败，请检查是否被其他应用占用';
     console.warn(error);
-  } finally {cameraButton.disabled=false;}
+  } finally {
+    player.removeEventListener('pause',resumeStartupMusic);
+    resumeStartupMusic();
+    keepMusicDuringStartup=false;
+    cameraButton.disabled=false;
+  }
 };
 </script>
 </html>
