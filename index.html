@@ -607,8 +607,11 @@ cameraButton.onclick=async ()=>{
   keepMusicDuringStartup=!player.paused;
   // Try once at the interruption and again after camera startup has settled.
   player.addEventListener('pause',resumeStartupMusic,{once:true});
-  let stage='camera';
+  let stage='model';
   try {
+    // 先加载模型，让手机在整个导入期间只播放音乐。就绪后再启动预览。
+    if (!detector) detector=await initializeHandDetector();
+    stage='camera';
     if (!stream) {
       showHandStartup('正在申请摄像头权限…');
       stream=await navigator.mediaDevices.getUserMedia({
@@ -623,8 +626,6 @@ cameraButton.onclick=async ()=>{
     await feed.play();
     resumeStartupMusic();
     resumeVideo=false;
-    stage='model';
-    if (!detector) detector=await initializeHandDetector();
     handStartup.hidden=true;
     cameraButton.textContent='关闭手势';
     hint.textContent='右手握拳收拢、张掌散开 · 左手捏合抽取、松开放回';
