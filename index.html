@@ -30,7 +30,7 @@ figure[data-frame="film"]{--pose:rotate(-1deg);--entry:translateX(36px) rotate(3
 #tree-toggle{display:none}
 @media(any-pointer:coarse){#tree-toggle{display:block}}
 #feed{position:absolute;right:12px;bottom:108px;width:clamp(76px,17vw,132px);aspect-ratio:4/3;object-fit:cover;border:1px solid #d5c08a75;border-radius:8px;transform:scaleX(-1);pointer-events:none}
-#pinch-hint{position:absolute;right:12px;bottom:calc(118px + clamp(57px,12.75vw,99px));margin:0;padding:7px 10px;border-radius:8px;background:#091611ed;color:#f4e9ca;font-size:13px;pointer-events:none}
+#pinch-hint,#hand-startup{position:absolute;right:12px;bottom:calc(118px + clamp(57px,12.75vw,99px));max-width:calc(100% - 24px);margin:0;padding:7px 10px;border-radius:8px;background:#091611ed;color:#f4e9ca;font-size:13px;pointer-events:none}
 </style>
 <main>
   <canvas tabindex="0" aria-label="互动圣诞树。空格切换聚散，回车抽取或收回照片。"></canvas>
@@ -52,6 +52,7 @@ figure[data-frame="film"]{--pose:rotate(-1deg);--entry:translateX(36px) rotate(3
   <audio id="player" src="圣诞铃声.wav" loop preload="none"></audio>
   <video id="feed" hidden autoplay muted playsinline aria-hidden="true"></video>
   <p id="pinch-hint" role="status" hidden>已识别左手捏合，请先在底栏添加照片。</p>
+  <p id="hand-startup" role="status" hidden></p>
 </main>
 <script>
 'use strict';
@@ -399,6 +400,7 @@ function render(now) {
 resize();requestAnimationFrame(render);
 
 const cameraButton = $('#camera');
+const handStartup = $('#hand-startup');
 let detector, stream, handFrame, resumeVideo=false, lastTime=-1, lastCheck=0;
 function stable(hand,value,now) {
   if (value!==hand.candidate) { hand.candidate=value; hand.since=now; }
@@ -458,31 +460,89 @@ function stopCamera() {
   stream?.getTracks().forEach(track=>track.stop());stream=null;feed.srcObject=null;
   feed.hidden=true;resumeVideo=false;
   pinchHint.hidden=true;
+  handStartup.hidden=true;
   hands.Left={};hands.Right={};lastTime=-1;
   cameraButton.textContent='开启手势';
 }
-async function createHandDetector() {
+function showHandStartup(message) {
+  handStartup.textContent=message;
+  handStartup.hidden=false;
+  hint.textContent=message;
+}
+async function createHandDetector(signal,report) {
   const options={canvas:document.createElement('canvas'),runningMode:'VIDEO',numHands:2};
   if (location.protocol==='file:') {
+    report('正在读取本地手势资源');
     const script=document.createElement('script');
     script.src='./gesture-offline.js';
+    let factory;
     try {
       await new Promise((resolve,reject)=>{
         script.onload=resolve;
         script.onerror=()=>reject(new Error('Missing gesture-offline.js'));
+        signal.addEventListener('abort',()=>reject(signal.reason),{once:true});
         document.head.append(script);
       });
-      return await window.createOfflineHandDetector(options);
+      factory=window.createOfflineHandDetector;
     } finally {
       delete window.createOfflineHandDetector;
       script.remove();
     }
+    if (signal.aborted) throw signal.reason;
+    report('正在启动手势引擎',16000);
+    return factory(options);
   }
+  report('正在加载手势模型和运行库');
   const base=new URL('.',location.href).href.slice(0,-1);
-  const {GestureRecognizer,FilesetResolver}=await import(base+'/vision_bundle.mjs');
-  return GestureRecognizer.createFromOptions(await FilesetResolver.forVisionTasks(base),{
-    ...options,baseOptions:{modelAssetPath:base+'/gesture_recognizer.task',delegate:'CPU'}
+  async function loadBytes(url) {
+    const response=await fetch(url,{signal});
+    if (!response.ok) throw new Error('Cannot load '+url+' ('+response.status+')');
+    return response.arrayBuffer();
+  }
+  const runtime=(async()=>{
+    const {GestureRecognizer,FilesetResolver}=await import(base+'/vision_bundle.mjs');
+    const fileset=await FilesetResolver.forVisionTasks(base);
+    return {GestureRecognizer,fileset,wasm:await loadBytes(fileset.wasmBinaryPath)};
+  })();
+  const [model,{GestureRecognizer,fileset,wasm}]=await Promise.all([
+    loadBytes(base+'/gesture_recognizer.task'),runtime
+  ]);
+  if (signal.aborted) throw signal.reason;
+  report('正在启动手势引擎',16000);
+  const wasmBinaryPath=URL.createObjectURL(new Blob([wasm],{type:'application/wasm'}));
+  try {
+    return await GestureRecognizer.createFromOptions({...fileset,wasmBinaryPath},{
+      ...options,baseOptions:{modelAssetBuffer:new Uint8Array(model),delegate:'CPU'}
+    });
+  } finally {
+    URL.revokeObjectURL(wasmBinaryPath);
+  }
+}
+async function initializeHandDetector() {
+  const controller=new AbortController();
+  const {signal}=controller;
+  let timer, step;
+  const report=(message,timeout=42000)=>{
+    step=message.slice(2);
+    showHandStartup(message+'…');
+    clearTimeout(timer);
+    timer=setTimeout(()=>controller.abort(new DOMException(step+'超时','TimeoutError')),timeout);
+  };
+  const aborted=new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));
+  const pending=createHandDetector(signal,report).then(instance=>{
+    if (!signal.aborted) return instance;
+    instance.close();
+    throw signal.reason;
   });
+  try {
+    return await Promise.race([pending,aborted]);
+  } catch (error) {
+    if (error.name==='TimeoutError') throw error;
+    throw new Error(step+'失败',{cause:error});
+  } finally {
+    clearTimeout(timer);
+    if (!signal.aborted) controller.abort();
+  }
 }
 cameraButton.onclick=async ()=>{
   if (stream && !resumeVideo) { stopCamera();hint.textContent='手势已关闭';return; }
@@ -507,10 +567,8 @@ cameraButton.onclick=async ()=>{
     await feed.play();
     resumeVideo=false;
     stage='model';
-    if (!detector) {
-      hint.textContent='正在初始化内置手势识别…';
-      detector=await createHandDetector();
-    }
+    if (!detector) detector=await initializeHandDetector();
+    handStartup.hidden=true;
     cameraButton.textContent='关闭手势';
     hint.textContent='右手握拳收拢、张掌散开 · 左手捏合抽取、松开放回';
     handFrame=requestAnimationFrame(readHands);
@@ -522,9 +580,11 @@ cameraButton.onclick=async ()=>{
       return;
     }
     stopCamera();
-    if (stage==='model') hint.textContent=location.protocol==='file:'
-      ? '本地手势模型启动失败，请确认网页和手势文件在同一文件夹，或使用新版 Chrome、Edge'
-      : '手势模型启动失败，请刷新网页后重试，或更换浏览器';
+    if (stage==='model') showHandStartup(error.name==='TimeoutError'
+      ? error.message+'，请点「开启手势」重试'
+      : location.protocol==='file:'
+        ? error.message+'，请确认网页和手势文件在同一文件夹'
+        : error.message+'，请重试，或用 Safari、Chrome 打开');
     else if (error.name==='NotAllowedError') hint.textContent='摄像头权限未开启，请在浏览器或手机设置中允许访问';
     else if (error.name==='NotFoundError') hint.textContent='没有找到可用的摄像头';
     else hint.textContent='摄像头启动失败，请检查是否被其他应用占用';
