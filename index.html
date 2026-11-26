@@ -461,6 +461,29 @@ function stopCamera() {
   hands.Left={};hands.Right={};lastTime=-1;
   cameraButton.textContent='开启手势';
 }
+async function createHandDetector() {
+  const options={canvas:document.createElement('canvas'),runningMode:'VIDEO',numHands:2};
+  if (location.protocol==='file:') {
+    const script=document.createElement('script');
+    script.src='./gesture-offline.js';
+    try {
+      await new Promise((resolve,reject)=>{
+        script.onload=resolve;
+        script.onerror=()=>reject(new Error('Missing gesture-offline.js'));
+        document.head.append(script);
+      });
+      return await window.createOfflineHandDetector(options);
+    } finally {
+      delete window.createOfflineHandDetector;
+      script.remove();
+    }
+  }
+  const base=new URL('.',location.href).href.slice(0,-1);
+  const {GestureRecognizer,FilesetResolver}=await import(base+'/vision_bundle.mjs');
+  return GestureRecognizer.createFromOptions(await FilesetResolver.forVisionTasks(base),{
+    ...options,baseOptions:{modelAssetPath:base+'/gesture_recognizer.task',delegate:'CPU'}
+  });
+}
 cameraButton.onclick=async ()=>{
   if (stream && !resumeVideo) { stopCamera();hint.textContent='手势已关闭';return; }
   if (!navigator.mediaDevices?.getUserMedia) {
@@ -485,20 +508,8 @@ cameraButton.onclick=async ()=>{
     resumeVideo=false;
     stage='model';
     if (!detector) {
-      hint.textContent='正在加载手势模型，首次打开需要下载…';
-      const localFile=location.protocol==='file:';
-      const base=localFile
-        ? 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304'
-        : new URL('.',location.href).href.replace(/\/$/,'');
-      const {GestureRecognizer,FilesetResolver}=await import(base+'/vision_bundle.mjs');
-      const modelAssetPath=localFile
-        ? 'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task'
-        : base+'/gesture_recognizer.task';
-      detector=await GestureRecognizer.createFromOptions(await FilesetResolver.forVisionTasks(localFile ? base+'/wasm' : base),{
-        baseOptions:{modelAssetPath,delegate:'CPU'},
-        canvas:document.createElement('canvas'),
-        runningMode:'VIDEO',numHands:2
-      });
+      hint.textContent='正在初始化内置手势识别…';
+      detector=await createHandDetector();
     }
     cameraButton.textContent='关闭手势';
     hint.textContent='右手握拳收拢、张掌散开 · 左手捏合抽取、松开放回';
@@ -511,7 +522,9 @@ cameraButton.onclick=async ()=>{
       return;
     }
     stopCamera();
-    if (stage==='model') hint.textContent='手势模型启动失败，请检查网络后重试，或更换浏览器';
+    if (stage==='model') hint.textContent=location.protocol==='file:'
+      ? '本地手势模型启动失败，请确认网页和手势文件在同一文件夹，或使用新版 Chrome、Edge'
+      : '手势模型启动失败，请刷新网页后重试，或更换浏览器';
     else if (error.name==='NotAllowedError') hint.textContent='摄像头权限未开启，请在浏览器或手机设置中允许访问';
     else if (error.name==='NotFoundError') hint.textContent='没有找到可用的摄像头';
     else hint.textContent='摄像头启动失败，请检查是否被其他应用占用';
