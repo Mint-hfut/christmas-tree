@@ -46,7 +46,6 @@ figure[data-frame="film"]{--pose:rotate(-1deg);--entry:translateX(36px) rotate(3
       <button id="music">播放音乐</button>
       <label>自选音乐<input id="track" type="file" accept="audio/*"></label>
       <button id="camera">开启手势</button>
-      <label id="pack-label">导入手势包<input id="pack-file" type="file" accept=".js"></label>
     </nav>
     </div>
   </footer>
@@ -404,32 +403,9 @@ const cameraButton = $('#camera');
 const handStartup = $('#hand-startup');
 const packCache='christmas-gesture-pack-v1';
 const packKey=new URL('./gesture-offline.js',location.href).href;
-let phonePack;
-if (location.protocol==='file:') $('#pack-label').hidden=true;
-else if ('serviceWorker' in navigator) {
+if (location.protocol!=='file:' && 'serviceWorker' in navigator) {
   navigator.serviceWorker.register('./offline-sw.js').catch(console.warn);
 }
-$('#pack-file').onchange=async event=>{
-  const file=event.target.files[0];
-  event.target.value='';
-  if (!file) return;
-  try {
-    if (file.size!==16342747) throw new Error('文件大小不符');
-    const bytes=await file.arrayBuffer();
-    const hash=new Uint8Array(await crypto.subtle.digest('SHA-256',bytes));
-    const hex=Array.from(hash,b=>b.toString(16).padStart(2,'0')).join('');
-    if (hex!=='b6829a3290ee29ef63242898d4e3a0d6adeaf800a22de7f2f66bd7b3bb159f3c') throw new Error('文件校验不通过');
-    phonePack=new Blob([bytes],{type:'text/javascript'});
-    try {
-      await (await caches.open(packCache)).put(packKey,new Response(phonePack));
-      showHandStartup('手势包已保存在此设备，点「开启手势」即可使用');
-    } catch {
-      showHandStartup('手势包已就绪。浏览器存储不可用，重新打开后需再导入');
-    }
-  } catch {
-    showHandStartup('请选择本项目原版 gesture-offline.js 文件');
-  }
-};
 let detector, stream, handFrame, resumeVideo=false, lastTime=-1, lastCheck=0;
 function stable(hand,value,now) {
   if (value!==hand.candidate) { hand.candidate=value; hand.since=now; }
@@ -501,8 +477,9 @@ function showHandStartup(message) {
 async function createHandDetector(signal,report) {
   const options={canvas:document.createElement('canvas'),runningMode:'VIDEO',numHands:2};
   const fileMode=location.protocol==='file:';
-  report('正在检查本机手势资源');
-  if (!fileMode && !phonePack && 'caches' in window) {
+  let phonePack;
+  report('正在载入手势包 0%');
+  if (!fileMode && 'caches' in window) {
     try {
       const saved=await (await caches.open(packCache)).match(packKey);
       if (saved) phonePack=await saved.blob();
@@ -510,7 +487,7 @@ async function createHandDetector(signal,report) {
   }
   if (signal.aborted) throw signal.reason;
   if (fileMode || phonePack) {
-    report('正在读取本地手势资源');
+    report('正在载入手势包 0%');
     const script=document.createElement('script');
     script.src=fileMode ? packKey : URL.createObjectURL(phonePack);
     let factory;
@@ -528,15 +505,34 @@ async function createHandDetector(signal,report) {
       if (!fileMode) URL.revokeObjectURL(script.src);
     }
     if (signal.aborted) throw signal.reason;
-    report('正在启动手势引擎',16000);
+    report('手势包 100% · 正在启动手势引擎',16000);
     return factory(options);
   }
-  report('正在加载手势模型和运行库');
   const base=new URL('.',location.href).href.slice(0,-1);
+  const {GestureRecognizer,FilesetResolver}=await import(base+'/vision_bundle.mjs');
+  const fileset=await FilesetResolver.forVisionTasks(base);
+  if (signal.aborted) throw signal.reason;
+  // fetch 的读取流已解压；总量使用当前发布文件的原始字节数。
+  const wasmBytes=fileset.wasmBinaryPath.endsWith('nosimd_internal.wasm') ? 9448638 : 9574032;
+  const totalBytes=8373440+wasmBytes;
+  let transferred=0,previousPercent=0;
+  function countBytes(count) {
+    if (signal.aborted) throw signal.reason;
+    transferred+=count;
+    const percent=Math.min(99,Math.floor(transferred*100/totalBytes));
+    if (percent!==previousPercent) {
+      previousPercent=percent;
+      report('正在载入手势包 '+percent+'%');
+    }
+  }
   async function loadBytes(url) {
     const response=await fetch(url,{signal});
     if (!response.ok) throw new Error('Cannot load '+url+' ('+response.status+')');
-    if (!response.body) return response.arrayBuffer();
+    if (!response.body) {
+      const buffer=await response.arrayBuffer();
+      countBytes(buffer.byteLength);
+      return buffer;
+    }
     const reader=response.body.getReader(),chunks=[];
     let length=0;
     for (;;) {
@@ -544,30 +540,18 @@ async function createHandDetector(signal,report) {
       if (done) break;
       chunks.push(value);
       length+=value.length;
-      transferred+=value.length;
-      if (signal.aborted) throw signal.reason;
-      const tenths=Math.floor(transferred/100000);
-      if (tenths!==lastTenths) {
-        lastTenths=tenths;
-        report('正在读取手势资源 '+(tenths/10).toFixed(1)+' MB');
-      }
+      countBytes(value.length);
     }
     const bytes=new Uint8Array(length);
     let offset=0;
     for (const chunk of chunks) {bytes.set(chunk,offset);offset+=chunk.length;}
     return bytes.buffer;
   }
-  let transferred=0,lastTenths=-1;
-  const runtime=(async()=>{
-    const {GestureRecognizer,FilesetResolver}=await import(base+'/vision_bundle.mjs');
-    const fileset=await FilesetResolver.forVisionTasks(base);
-    return {GestureRecognizer,fileset,wasm:await loadBytes(fileset.wasmBinaryPath)};
-  })();
-  const [model,{GestureRecognizer,fileset,wasm}]=await Promise.all([
-    loadBytes(base+'/gesture_recognizer.task'),runtime
+  const [model,wasm]=await Promise.all([
+    loadBytes(base+'/gesture_recognizer.task'),loadBytes(fileset.wasmBinaryPath)
   ]);
   if (signal.aborted) throw signal.reason;
-  report('正在启动手势引擎',16000);
+  report('手势包 100% · 正在启动手势引擎',16000);
   const wasmBinaryPath=URL.createObjectURL(new Blob([wasm],{type:'application/wasm'}));
   try {
     return await GestureRecognizer.createFromOptions({...fileset,wasmBinaryPath},{
@@ -582,7 +566,7 @@ async function initializeHandDetector() {
   const {signal}=controller;
   let timer, step;
   const report=(message,timeout=42000)=>{
-    step=message.slice(2);
+    step=message.includes('启动手势引擎') ? '启动手势引擎' : '载入手势包';
     showHandStartup(message+'…');
     clearTimeout(timer);
     timer=setTimeout(()=>controller.abort(new DOMException(step+'超时','TimeoutError')),timeout);
